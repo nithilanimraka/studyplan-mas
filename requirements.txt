@@ -1,0 +1,36 @@
+# Core Framework
+crewai>=0.28.0
+crewai-tools>=0.4.0
+
+# LLM Integration
+openai>=1.0.0
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-community>=0.0.20
+
+# Vector Databases & Embeddings
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+
+# PDF Processing
+pypdf>=4.0.0
+
+# Web Search Tools
+google-search-results>=2.4.2
+
+# Streamlit & UI
+streamlit>=1.32.0
+streamlit-chat>=0.1.1
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+PyYAML>=6.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Logging
+loguru>=0.7.0
