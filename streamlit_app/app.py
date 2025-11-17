@@ -8,7 +8,10 @@ from datetime import datetime, timedelta
 import sys
 from pathlib import Path
 import time
-import logging
+import io
+from contextlib import redirect_stdout, redirect_stderr
+import queue
+import threading
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -111,65 +114,59 @@ def init_session_state():
     
     if "agent_logs" not in st.session_state:
         st.session_state.agent_logs = []
-    
-    if "current_agent" not in st.session_state:
-        st.session_state.current_agent = None
-    
-    if "current_task" not in st.session_state:
-        st.session_state.current_task = None
 
 
-# Custom logging handler to capture CrewAI logs
-class StreamlitLogHandler(logging.Handler):
-    """Custom handler to capture logs and display in Streamlit."""
+class OutputCapture:
+    """Capture stdout/stderr for CrewAI verbose output."""
     
-    def __init__(self, log_container):
-        super().__init__()
-        self.log_container = log_container
+    def __init__(self):
         self.logs = []
+        self.output_queue = queue.Queue()
         
-    def emit(self, record):
-        try:
-            log_entry = self.format(record)
-            self.logs.append(log_entry)
-            
-            # Format and display logs
-            formatted_html = self.format_logs_html()
-            self.log_container.markdown(formatted_html, unsafe_allow_html=True)
-            
-        except Exception:
-            self.handleError(record)
+    def write(self, text):
+        """Capture written text."""
+        if text and text.strip():
+            self.logs.append(text)
+            self.output_queue.put(text)
     
-    def format_logs_html(self):
-        """Format logs with HTML styling."""
+    def flush(self):
+        """Flush (required for file-like object)."""
+        pass
+    
+    def get_formatted_logs(self):
+        """Get formatted HTML logs."""
         formatted_lines = []
         
-        for log in self.logs[-50:]:  # Keep last 50 log entries
-            # Color code different log levels and keywords
-            line = log
+        # Keep last 100 lines (using correct slice notation)
+        recent_logs = self.logs[-100:] if len(self.logs) > 100 else self.logs
+        
+        for log in recent_logs:
+            line = log.strip()
+            if not line:
+                continue
             
-            # Highlight agents
-            if "Agent:" in line or "agent" in line.lower():
-                line = f'<span class="agent-name">🤖 {line}</span>'
-            # Highlight tasks
-            elif "Task:" in line or "task" in line.lower():
-                line = f'<span class="task-name">📋 {line}</span>'
-            # Highlight thinking/reasoning
-            elif "Thought:" in line or "thinking" in line.lower():
-                line = f'<span class="thinking">💭 {line}</span>'
-            # Highlight tool usage
-            elif "Tool:" in line or "Using Tool" in line or "Search" in line:
-                line = f'<span class="tool-use">🔧 {line}</span>'
-            # Highlight completion
-            elif "Completed" in line or "Finished" in line or "SUCCESS" in line:
-                line = f'<span class="status-completed">✅ {line}</span>'
-            # Highlight execution
-            elif "Executing" in line or "Starting" in line or "Working" in line:
-                line = f'<span class="status-executing">⚙️ {line}</span>'
+            # Format based on content
+            if "Agent:" in line or "Working Agent:" in line:
+                formatted = f'<span class="agent-name">🤖 {line}</span>'
+            elif "Task:" in line:
+                formatted = f'<span class="task-name">📋 {line}</span>'
+            elif "Thought:" in line or "I need to" in line or "I should" in line:
+                formatted = f'<span class="thinking">💭 {line}</span>'
+            elif "Using Tool" in line or "Tool:" in line or "Action:" in line:
+                formatted = f'<span class="tool-use">🔧 {line}</span>'
+            elif "Observation:" in line or "Result:" in line:
+                formatted = f'<span class="tool-use">📊 {line}</span>'
+            elif "Final Answer:" in line or "Finished chain" in line:
+                formatted = f'<span class="status-completed">✅ {line}</span>'
+            elif "Entering new" in line or "Starting" in line:
+                formatted = f'<span class="status-executing">⚙️ {line}</span>'
             else:
-                line = f'<span style="color: #d4d4d4;">{line}</span>'
+                formatted = f'<span style="color: #d4d4d4;">{line}</span>'
             
-            formatted_lines.append(line)
+            formatted_lines.append(formatted)
+        
+        if not formatted_lines:
+            return '<div class="agent-log"><span style="color: #888;">Waiting for agents to start...</span></div>'
         
         content = "<br>".join(formatted_lines)
         return f'<div class="agent-log">{content}</div>'
@@ -213,7 +210,7 @@ def process_pdf(uploaded_file):
 
 
 def run_crew_with_logs(crew_func, *args, **kwargs):
-    """Run crew function and capture logs with a progress display."""
+    """Run crew function and capture verbose output."""
     # Create expandable section for logs
     log_expander = st.expander("🔍 View Agent Thought Process", expanded=True)
     
@@ -221,62 +218,73 @@ def run_crew_with_logs(crew_func, *args, **kwargs):
         log_container = st.empty()
         progress_text = st.empty()
         
-        # Set up logging handler
-        handler = StreamlitLogHandler(log_container)
-        handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
+        # Create output capture
+        capture = OutputCapture()
         
-        # Add handler to root logger and crewai logger
-        root_logger = logging.getLogger()
-        crewai_logger = logging.getLogger('crewai')
+        # Show initial message
+        progress_text.info("🤖 AI agents are working... Check the thought process below!")
         
-        root_logger.addHandler(handler)
-        crewai_logger.addHandler(handler)
-        crewai_logger.setLevel(logging.INFO)
+        def run_with_capture():
+            """Run function with output capture."""
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            
+            try:
+                # Redirect stdout and stderr
+                sys.stdout = capture
+                sys.stderr = capture
+                
+                # Execute crew function
+                return crew_func(*args, **kwargs)
+                
+            finally:
+                # Restore stdout/stderr
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
         
-        # Also capture print statements
-        original_print = print
-        print_logs = []
+        # Run in thread and update UI periodically
+        result_container = {'result': None, 'error': None}
         
-        def custom_print(*args, **kwargs):
-            message = " ".join(str(arg) for arg in args)
-            print_logs.append(message)
-            handler.logs.append(message)
-            handler.format_logs_html()
-            log_container.markdown(handler.format_logs_html(), unsafe_allow_html=True)
-            original_print(*args, **kwargs)
+        def execute():
+            try:
+                result_container['result'] = run_with_capture()
+            except Exception as e:
+                result_container['error'] = e
         
-        try:
-            # Replace print temporarily
-            import builtins
-            builtins.print = custom_print
+        # Start execution thread
+        thread = threading.Thread(target=execute)
+        thread.start()
+        
+        # Update logs while thread is running
+        while thread.is_alive():
+            # Get new logs from queue
+            try:
+                while True:
+                    capture.output_queue.get_nowait()
+            except queue.Empty:
+                pass
             
-            # Show initial message
-            progress_text.info("🤖 AI agents are working... Check the thought process below!")
-            
-            # Execute crew function
-            result = crew_func(*args, **kwargs)
-            
-            # Show completion
-            progress_text.success("✅ Process completed! Review the agent thought process above.")
-            
-            return result
-            
-        except Exception as e:
-            progress_text.error(f"❌ Error: {str(e)}")
-            raise
-            
-        finally:
-            # Restore original print
-            builtins.print = original_print
-            
-            # Remove handlers
-            root_logger.removeHandler(handler)
-            crewai_logger.removeHandler(handler)
-            
-            # Store logs in session state
-            st.session_state.agent_logs = handler.logs
+            # Update display
+            log_container.markdown(capture.get_formatted_logs(), unsafe_allow_html=True)
+            time.sleep(0.5)
+        
+        thread.join()
+        
+        # Final update
+        log_container.markdown(capture.get_formatted_logs(), unsafe_allow_html=True)
+        
+        # Store logs
+        st.session_state.agent_logs = capture.logs
+        
+        # Check for errors
+        if result_container['error']:
+            progress_text.error(f"❌ Error: {str(result_container['error'])}")
+            raise result_container['error']
+        
+        # Show completion
+        progress_text.success("✅ Process completed! Review the agent thought process above.")
+        
+        return result_container['result']
 
 
 def main():
