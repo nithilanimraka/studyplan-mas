@@ -292,7 +292,7 @@ def main():
     init_session_state()
     
     # Header
-    st.markdown('<div class="main-header">📚 AI Study Plan Generator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📚 Multi Agentic Assignment Plan Generator</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="sub-header">Powered by CrewAI, GPT-4o, and SerperAPI</div>', 
         unsafe_allow_html=True
